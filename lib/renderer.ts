@@ -1228,11 +1228,16 @@ export function drawCustomGlyph(
   // Arms meet at the centre. An arm that stops there (a corner or tee) reaches
   // exactly to the far edge of the crossing line — no further, so corners neither
   // gap nor poke out.
-  const span = (wgt: number) => (wgt === 3 ? gap + light : wgt ? Math.ceil(t(wgt) / 2) : 0);
-  const vReach = Math.max(span(u), span(d));
-  const hReach = Math.max(span(l), span(r));
-  if (l) hline(x, r ? cx : cx + vReach, l);
-  if (r) hline(l ? cx : cx - vReach, x + w, r);
-  if (u) vline(y, d ? cy : cy + hReach, u);
-  if (d) vline(u ? cy : cy - hReach, y + h, d);
+  // The crossing line occupies [lo, hi) around the centre — the same rounding
+  // `hline` / `vline` use, so the joint is pixel-exact.
+  const band = (c: number, wgt: number): [number, number] =>
+    wgt === 3 ? [c - gap, c + gap] : [c - Math.floor(t(wgt) / 2), c - Math.floor(t(wgt) / 2) + t(wgt)];
+  const vw = Math.max(u, d) === 3 ? 3 : Math.max(u, d);
+  const hw = Math.max(l, r) === 3 ? 3 : Math.max(l, r);
+  const [vlo, vhi] = vw ? band(cx, vw) : [cx, cx];
+  const [hlo, hhi] = hw ? band(cy, hw) : [cy, cy];
+  if (l) hline(x, r ? cx : vhi, l);
+  if (r) hline(l ? cx : vlo, x + w, r);
+  if (u) vline(y, d ? cy : hhi, u);
+  if (d) vline(u ? cy : hlo, y + h, d);
 }
