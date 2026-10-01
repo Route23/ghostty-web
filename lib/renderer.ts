@@ -610,14 +610,16 @@ export class CanvasRenderer {
         let text = '';
         for (let i = x; i < end; i++) text += String.fromCodePoint(line[i].codepoint || 32);
         this.setTextStyle(cell);
-        const spacing = this.metrics.width - this.advance;
-        const ctx = this.ctx as CanvasRenderingContext2D & { letterSpacing?: string };
-        const hadSpacing = ctx.letterSpacing;
-        if (spacing !== 0 && 'letterSpacing' in ctx) ctx.letterSpacing = `${spacing}px`;
+        // Pin the run to the cell grid by stretching it horizontally, not with
+        // letter-spacing: any non-zero letter-spacing turns ligatures off.
+        const ctx = this.ctx;
+        const scale = this.advance > 0 ? this.metrics.width / this.advance : 1;
+        ctx.save();
+        ctx.translate(x * this.metrics.width, y * this.metrics.height + this.metrics.baseline);
+        ctx.scale(scale, 1);
         if (cell.flags & CellFlags.FAINT) ctx.globalAlpha = 0.5;
-        ctx.fillText(text, x * this.metrics.width, y * this.metrics.height + this.metrics.baseline);
-        ctx.globalAlpha = 1.0;
-        if ('letterSpacing' in ctx) ctx.letterSpacing = hadSpacing ?? '0px';
+        ctx.fillText(text, 0, 0);
+        ctx.restore();
       }
       x = end;
     }
@@ -1223,10 +1225,14 @@ export function drawCustomGlyph(
       ctx.fillRect(cx - Math.floor(t(wgt) / 2), y0, t(wgt), y1 - y0);
     }
   };
-  // Arms meet at the centre; extend each by half the crossing line so corners close.
-  const pad = heavy;
-  if (l) hline(x, cx + (r ? 0 : pad / 2), l);
-  if (r) hline(cx - (l ? 0 : pad / 2), x + w, r);
-  if (u) vline(y, cy + (d ? 0 : pad / 2), u);
-  if (d) vline(cy - (u ? 0 : pad / 2), y + h, d);
+  // Arms meet at the centre. An arm that stops there (a corner or tee) reaches
+  // exactly to the far edge of the crossing line — no further, so corners neither
+  // gap nor poke out.
+  const span = (wgt: number) => (wgt === 3 ? gap + light : wgt ? Math.ceil(t(wgt) / 2) : 0);
+  const vReach = Math.max(span(u), span(d));
+  const hReach = Math.max(span(l), span(r));
+  if (l) hline(x, r ? cx : cx + vReach, l);
+  if (r) hline(l ? cx : cx - vReach, x + w, r);
+  if (u) vline(y, d ? cy : cy + hReach, u);
+  if (d) vline(u ? cy : cy - hReach, y + h, d);
 }
