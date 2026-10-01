@@ -356,6 +356,12 @@ export class GhosttyTerminal {
     this.initCellPool();
   }
 
+  /** Tab stops every `width` columns (dopamine #414). No-op on a WASM build without it. */
+  setTabWidth(width: number): void {
+    const f = this.exports.ghostty_terminal_set_tab_width as ((t: number, w: number) => void) | undefined;
+    f?.(this.handle, width);
+  }
+
   free(): void {
     if (this.viewportBufferPtr) {
       this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);

@@ -412,6 +412,8 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_terminal_new_with_config(cols: number, rows: number, configPtr: number): TerminalHandle;
   ghostty_terminal_free(terminal: TerminalHandle): void;
   ghostty_terminal_resize(terminal: TerminalHandle, cols: number, rows: number): void;
+  /** Tab stops every `width` columns (dopamine #414). Missing in older builds. */
+  ghostty_terminal_set_tab_width(terminal: TerminalHandle, width: number): void;
   ghostty_terminal_write(terminal: TerminalHandle, dataPtr: number, dataLen: number): void;
 
   // RenderState API - high-performance rendering (ONE call gets ALL data)

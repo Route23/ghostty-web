@@ -1,0 +1,28 @@
+# dopamine の fork（Route23/dopamine #414）: WASM と UMD を組んで artifact にする。
+# zig 0.15.2 が macOS 26 でリンクできないので、手元ではなくここで組む。
+name: dopamine build
+on:
+  push:
+    branches: [dopamine-0.4.0]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: zig 0.15.2
+        run: |
+          curl -sSfL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar xJ
+          echo "$PWD/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun run typecheck
+      - run: bun run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ghostty-web-dopamine
+          path: |
+            dist/ghostty-web.umd.cjs
+            ghostty-vt.wasm

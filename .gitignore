@@ -6,3 +6,4 @@ dist/
 
 # WASM build output (built locally and in CI)
 ghostty-vt.wasm
+.tools/

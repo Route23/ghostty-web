@@ -50,6 +50,24 @@ export interface RendererOptions {
   devicePixelRatio?: number; // Default: window.devicePixelRatio
 }
 
+/**
+ * How glyphs are drawn (dopamine #414). All off by default — the renderer then
+ * behaves exactly as upstream.
+ */
+export interface RenderOptions {
+  /** CSS font-weight for normal / bold cells (default 'normal' / 'bold'). */
+  fontWeight?: string;
+  fontWeightBold?: string;
+  /** WCAG contrast ratio the text keeps against its background (1 = off). */
+  minimumContrastRatio?: number;
+  /** Draw box-drawing and block characters as paths instead of font glyphs. */
+  customGlyphs?: boolean;
+  /** Draw runs of same-styled cells with one fillText so the font can form ligatures. */
+  ligatures?: boolean;
+  /** Bold text in one of the 8 normal ANSI colours is drawn in its bright twin. */
+  drawBoldTextInBrightColors?: boolean;
+}
+
 export interface FontMetrics {
   width: number; // Character cell width in CSS pixels
   height: number; // Character cell height in CSS pixels
@@ -98,6 +116,16 @@ export class CanvasRenderer {
   private fontFamily: string;
   private cursorStyle: 'block' | 'underline' | 'bar';
   private cursorBlink: boolean;
+  private renderOpts: Required<RenderOptions> = {
+    fontWeight: 'normal',
+    fontWeightBold: 'bold',
+    minimumContrastRatio: 1,
+    customGlyphs: false,
+    ligatures: false,
+    drawBoldTextInBrightColors: false,
+  };
+  /** The font's real advance for one cell (unrounded), for ligature runs. */
+  private advance = 0;
   private theme: Required<ITheme>;
   private devicePixelRatio: number;
   private metrics: FontMetrics;
@@ -198,6 +226,7 @@ export class CanvasRenderer {
     // Measure width using 'M' (typically widest character)
     const widthMetrics = ctx.measureText('M');
     const width = Math.ceil(widthMetrics.width);
+    this.advance = widthMetrics.width;
 
     // Measure height using ascent + descent with padding for glyph overflow
     const ascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
@@ -533,11 +562,96 @@ export class CanvasRenderer {
 
     // PASS 2: Draw all cell text and decorations
     // Now text can safely extend beyond cell boundaries (for complex scripts)
+    if (this.renderOpts.ligatures) {
+      this.renderLineRuns(line, y);
+      return;
+    }
     for (let x = 0; x < line.length; x++) {
       const cell = line[x];
       if (cell.width === 0) continue; // Skip spacer cells for wide characters
       this.renderCellText(cell, x, y);
     }
+  }
+
+  /**
+   * Ligatures (dopamine #414): a run of narrow, plain, same-styled cells is drawn
+   * with one fillText so the font can join `->`, `!=`, `===`… Anything special
+   * (wide, grapheme, selected, decorated, box drawing, hyperlinks) falls back to
+   * the per-cell path. Letter spacing pins each glyph to its cell.
+   */
+  private renderLineRuns(line: GhosttyCell[], y: number): void {
+    const plain = (c: GhosttyCell, x: number) =>
+      c.width === 1 &&
+      c.grapheme_len === 0 &&
+      c.hyperlink_id === 0 &&
+      (c.flags & (CellFlags.UNDERLINE | CellFlags.STRIKETHROUGH | CellFlags.INVISIBLE)) === 0 &&
+      !this.isInSelection(x, y) &&
+      !(this.renderOpts.customGlyphs && isCustomGlyph(c.codepoint));
+    const same = (a: GhosttyCell, b: GhosttyCell) =>
+      a.fg_r === b.fg_r && a.fg_g === b.fg_g && a.fg_b === b.fg_b && a.bg_r === b.bg_r &&
+      a.bg_g === b.bg_g && a.bg_b === b.bg_b && a.flags === b.flags;
+    let x = 0;
+    while (x < line.length) {
+      const cell = line[x];
+      if (cell.width === 0) {
+        x++;
+        continue;
+      }
+      if (!plain(cell, x)) {
+        this.renderCellText(cell, x, y);
+        x++;
+        continue;
+      }
+      let end = x + 1;
+      while (end < line.length && plain(line[end], end) && same(cell, line[end])) end++;
+      if (end - x === 1) {
+        this.renderCellText(cell, x, y);
+      } else {
+        let text = '';
+        for (let i = x; i < end; i++) text += String.fromCodePoint(line[i].codepoint || 32);
+        this.setTextStyle(cell);
+        const spacing = this.metrics.width - this.advance;
+        const ctx = this.ctx as CanvasRenderingContext2D & { letterSpacing?: string };
+        const hadSpacing = ctx.letterSpacing;
+        if (spacing !== 0 && 'letterSpacing' in ctx) ctx.letterSpacing = `${spacing}px`;
+        if (cell.flags & CellFlags.FAINT) ctx.globalAlpha = 0.5;
+        ctx.fillText(text, x * this.metrics.width, y * this.metrics.height + this.metrics.baseline);
+        ctx.globalAlpha = 1.0;
+        if ('letterSpacing' in ctx) ctx.letterSpacing = hadSpacing ?? '0px';
+      }
+      x = end;
+    }
+  }
+
+  /** The font and colour for a cell's text (weight, inverse, bright bold, contrast). */
+  private setTextStyle(cell: GhosttyCell): void {
+    const bold = (cell.flags & CellFlags.BOLD) !== 0;
+    const italic = (cell.flags & CellFlags.ITALIC) !== 0 ? 'italic ' : '';
+    const weight = bold ? this.renderOpts.fontWeightBold : this.renderOpts.fontWeight;
+    this.ctx.font = `${italic}${weight} ${this.fontSize}px ${this.fontFamily}`;
+    let fg: [number, number, number] = [cell.fg_r, cell.fg_g, cell.fg_b];
+    let bg: [number, number, number] = [cell.bg_r, cell.bg_g, cell.bg_b];
+    if (cell.flags & CellFlags.INVERSE) [fg, bg] = [bg, fg];
+    if (bold && this.renderOpts.drawBoldTextInBrightColors) fg = this.brightTwin(fg);
+    if (this.renderOpts.minimumContrastRatio > 1) {
+      const isDefaultBg = bg[0] === 0 && bg[1] === 0 && bg[2] === 0;
+      const back = isDefaultBg ? hexToRgb(this.theme.background) : bg;
+      fg = ensureContrast(fg, back, this.renderOpts.minimumContrastRatio);
+    }
+    this.ctx.fillStyle = this.rgbToCSS(fg[0], fg[1], fg[2]);
+  }
+
+  /**
+   * Bold in a normal ANSI colour → its bright twin. The cell only carries RGB, so
+   * this matches the RGB against the theme's 8 normal colours (a true-colour that
+   * happens to equal one is brightened too).
+   */
+  private brightTwin(fg: [number, number, number]): [number, number, number] {
+    for (let i = 0; i < 8; i++) {
+      const c = hexToRgb(this.palette[i]);
+      if (c[0] === fg[0] && c[1] === fg[1] && c[2] === fg[2]) return hexToRgb(this.palette[i + 8]);
+    }
+    return fg;
   }
 
   /**
@@ -598,29 +712,11 @@ export class CanvasRenderer {
     // Check if this cell is selected
     const isSelected = this.isInSelection(x, y);
 
-    // Set text style
-    let fontStyle = '';
-    if (cell.flags & CellFlags.ITALIC) fontStyle += 'italic ';
-    if (cell.flags & CellFlags.BOLD) fontStyle += 'bold ';
-    this.ctx.font = `${fontStyle}${this.fontSize}px ${this.fontFamily}`;
-
-    // Set text color - use selection foreground if selected
+    // Set text style (weight, inverse, bright bold, minimum contrast — dopamine #414)
+    this.setTextStyle(cell);
+    // Use selection foreground if selected
     if (isSelected) {
       this.ctx.fillStyle = this.theme.selectionForeground;
-    } else {
-      // Extract colors and handle inverse
-      let fg_r = cell.fg_r,
-        fg_g = cell.fg_g,
-        fg_b = cell.fg_b;
-
-      if (cell.flags & CellFlags.INVERSE) {
-        // When inverted, foreground becomes background
-        fg_r = cell.bg_r;
-        fg_g = cell.bg_g;
-        fg_b = cell.bg_b;
-      }
-
-      this.ctx.fillStyle = this.rgbToCSS(fg_r, fg_g, fg_b);
     }
 
     // Apply faint effect
@@ -641,7 +737,13 @@ export class CanvasRenderer {
       // Simple cell - single codepoint
       char = String.fromCodePoint(cell.codepoint || 32); // Default to space if null
     }
-    this.ctx.fillText(char, textX, textY);
+    // Box drawing / blocks as paths (dopamine #414): fonts rarely fill the cell, so
+    // lines break between rows.
+    if (this.renderOpts.customGlyphs && isCustomGlyph(cell.codepoint)) {
+      drawCustomGlyph(this.ctx, cell.codepoint, cellX, cellY, cellWidth, this.metrics.height);
+    } else {
+      this.ctx.fillText(char, textX, textY);
+    }
 
     // Reset alpha
     if (cell.flags & CellFlags.FAINT) {
@@ -790,6 +892,14 @@ export class CanvasRenderer {
       this.theme.brightCyan,
       this.theme.brightWhite,
     ];
+  }
+
+  /**
+   * Change how glyphs are drawn (dopamine #414). Unknown keys are ignored.
+   */
+  public setRenderOptions(opts: RenderOptions): void {
+    this.renderOpts = { ...this.renderOpts, ...opts };
+    this.metrics = this.measureFont();
   }
 
   /**
@@ -976,4 +1086,147 @@ export class CanvasRenderer {
   public dispose(): void {
     this.stopCursorBlink();
   }
+}
+
+// ============================================================================
+// Helpers (dopamine #414)
+// ============================================================================
+
+function hexToRgb(hex: string): [number, number, number] {
+  const h = hex.replace('#', '');
+  const v = h.length === 3 ? h.split('').map((c) => c + c).join('') : h.slice(0, 6);
+  const n = Number.parseInt(v, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function luminance([r, g, b]: [number, number, number]): number {
+  const f = (c: number) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+
+export function contrastRatio(a: [number, number, number], b: [number, number, number]): number {
+  const [l1, l2] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (l1 + 0.05) / (l2 + 0.05);
+}
+
+/** Move `fg` towards white or black (whichever the background allows) until the ratio holds. */
+export function ensureContrast(
+  fg: [number, number, number],
+  bg: [number, number, number],
+  ratio: number
+): [number, number, number] {
+  if (contrastRatio(fg, bg) >= ratio) return fg;
+  const towards: [number, number, number] = luminance(bg) > 0.5 ? [0, 0, 0] : [255, 255, 255];
+  let out = fg;
+  for (let t = 0.1; t <= 1.0001; t += 0.1) {
+    out = [0, 1, 2].map((i) => Math.round(fg[i] + (towards[i] - fg[i]) * t)) as [number, number, number];
+    if (contrastRatio(out, bg) >= ratio) break;
+  }
+  return out;
+}
+
+export function isCustomGlyph(cp: number): boolean {
+  return (cp >= 0x2500 && cp <= 0x257f) || (cp >= 0x2580 && cp <= 0x259f);
+}
+
+/**
+ * Box drawing (U+2500–257F): each glyph is up/right/down/left arms of weight
+ * 0 none, 1 light, 2 heavy, 3 double. Blocks (U+2580–259F) are rectangles / shades.
+ */
+const BOX: Record<number, [number, number, number, number]> = {};
+(() => {
+  // [up, right, down, left]
+  const set = (cp: number, u: number, r: number, d: number, l: number) => {
+    BOX[cp] = [u, r, d, l];
+  };
+  set(0x2500, 0, 1, 0, 1); set(0x2501, 0, 2, 0, 2); set(0x2502, 1, 0, 1, 0); set(0x2503, 2, 0, 2, 0);
+  set(0x250c, 0, 1, 1, 0); set(0x250f, 0, 2, 2, 0); set(0x2510, 0, 0, 1, 1); set(0x2513, 0, 0, 2, 2);
+  set(0x2514, 1, 1, 0, 0); set(0x2517, 2, 2, 0, 0); set(0x2518, 1, 0, 0, 1); set(0x251b, 2, 0, 0, 2);
+  set(0x251c, 1, 1, 1, 0); set(0x2523, 2, 2, 2, 0); set(0x2524, 1, 0, 1, 1); set(0x252b, 2, 0, 2, 2);
+  set(0x252c, 0, 1, 1, 1); set(0x2533, 0, 2, 2, 2); set(0x2534, 1, 1, 0, 1); set(0x253b, 2, 2, 0, 2);
+  set(0x253c, 1, 1, 1, 1); set(0x254b, 2, 2, 2, 2);
+  set(0x2550, 0, 3, 0, 3); set(0x2551, 3, 0, 3, 0); set(0x2554, 0, 3, 3, 0); set(0x2557, 0, 0, 3, 3);
+  set(0x255a, 3, 3, 0, 0); set(0x255d, 3, 0, 0, 3); set(0x2560, 3, 3, 3, 0); set(0x2563, 3, 0, 3, 3);
+  set(0x2566, 0, 3, 3, 3); set(0x2569, 3, 3, 0, 3); set(0x256c, 3, 3, 3, 3);
+  // rounded corners are drawn as light corners
+  set(0x256d, 0, 1, 1, 0); set(0x256e, 0, 0, 1, 1); set(0x256f, 1, 0, 0, 1); set(0x2570, 1, 1, 0, 0);
+  set(0x2574, 0, 0, 0, 1); set(0x2575, 1, 0, 0, 0); set(0x2576, 0, 1, 0, 0); set(0x2577, 0, 0, 1, 0);
+})();
+
+export function drawCustomGlyph(
+  ctx: CanvasRenderingContext2D,
+  cp: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+): void {
+  if (cp >= 0x2580) {
+    const shade = (a: number) => {
+      const old = ctx.globalAlpha;
+      ctx.globalAlpha = old * a;
+      ctx.fillRect(x, y, w, h);
+      ctx.globalAlpha = old;
+    };
+    switch (cp) {
+      case 0x2580: ctx.fillRect(x, y, w, h / 2); return;
+      case 0x2584: ctx.fillRect(x, y + h / 2, w, h / 2); return;
+      case 0x2588: ctx.fillRect(x, y, w, h); return;
+      case 0x258c: ctx.fillRect(x, y, w / 2, h); return;
+      case 0x2590: ctx.fillRect(x + w / 2, y, w / 2, h); return;
+      case 0x2591: shade(0.25); return;
+      case 0x2592: shade(0.5); return;
+      case 0x2593: shade(0.75); return;
+      default:
+        // lower eighths ▁..▇ (2581–2587), left eighths ▉..▏ (2589–258F)
+        if (cp >= 0x2581 && cp <= 0x2587) {
+          const f = (cp - 0x2580) / 8;
+          ctx.fillRect(x, y + h * (1 - f), w, h * f);
+        } else if (cp >= 0x2589 && cp <= 0x258f) {
+          const f = (0x2590 - cp) / 8;
+          ctx.fillRect(x, y, w * f, h);
+        } else {
+          ctx.fillText(String.fromCodePoint(cp), x, y + h * 0.8);
+        }
+        return;
+    }
+  }
+  const arms = BOX[cp];
+  if (!arms) {
+    ctx.fillText(String.fromCodePoint(cp), x, y + h * 0.8);
+    return;
+  }
+  const light = Math.max(1, Math.round(h / 16));
+  const heavy = light * 2;
+  const cx = Math.round(x + w / 2);
+  const cy = Math.round(y + h / 2);
+  const t = (wgt: number) => (wgt === 2 ? heavy : light);
+  // A double line is two light lines `gap` apart.
+  const gap = light * 2;
+  const [u, r, d, l] = arms;
+  const hline = (x0: number, x1: number, wgt: number) => {
+    if (wgt === 3) {
+      ctx.fillRect(x0, cy - gap, x1 - x0, light);
+      ctx.fillRect(x0, cy + gap - light, x1 - x0, light);
+    } else {
+      ctx.fillRect(x0, cy - Math.floor(t(wgt) / 2), x1 - x0, t(wgt));
+    }
+  };
+  const vline = (y0: number, y1: number, wgt: number) => {
+    if (wgt === 3) {
+      ctx.fillRect(cx - gap, y0, light, y1 - y0);
+      ctx.fillRect(cx + gap - light, y0, light, y1 - y0);
+    } else {
+      ctx.fillRect(cx - Math.floor(t(wgt) / 2), y0, t(wgt), y1 - y0);
+    }
+  };
+  // Arms meet at the centre; extend each by half the crossing line so corners close.
+  const pad = heavy;
+  if (l) hline(x, cx + (r ? 0 : pad / 2), l);
+  if (r) hline(cx - (l ? 0 : pad / 2), x + w, r);
+  if (u) vline(y, cy + (d ? 0 : pad / 2), u);
+  if (d) vline(cy - (u ? 0 : pad / 2), y + h, d);
 }

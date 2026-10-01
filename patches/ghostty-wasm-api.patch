@@ -1,5 +1,5 @@
 diff --git a/.gitignore b/.gitignore
-index e451b171a..89c623d8b 100644
+index e451b17..89c623d 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -23,3 +23,4 @@ glad.zip
@@ -8,7 +8,7 @@ index e451b171a..89c623d8b 100644
  vgcore.*
 +node_modules/
 diff --git a/include/ghostty/vt.h b/include/ghostty/vt.h
-index 4f8fef88e..ca9fb1d4d 100644
+index 4f8fef8..ca9fb1d 100644
 --- a/include/ghostty/vt.h
 +++ b/include/ghostty/vt.h
 @@ -28,6 +28,7 @@
@@ -29,10 +29,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..298ad36c1
+index 0000000..ad509a2
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,252 @@
 +/**
 + * @file terminal.h
 + *
@@ -138,6 +138,9 @@ index 000000000..298ad36c1
 +
 +/** Resize terminal */
 +void ghostty_terminal_resize(GhosttyTerminal term, int cols, int rows);
++
++/** Tab stops every `width` columns (dopamine). 0 or 8 = default. */
++void ghostty_terminal_set_tab_width(GhosttyTerminal term, int width);
 +
 +/** Write data to terminal (parses VT sequences) */
 +void ghostty_terminal_write(GhosttyTerminal term, const uint8_t* data, size_t len);
@@ -283,10 +286,10 @@ index 000000000..298ad36c1
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 03a883e20..f07bbd759 100644
+index 03a883e..1c0ae28 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -140,6 +140,41 @@ comptime {
+@@ -140,6 +140,42 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -295,6 +298,7 @@ index 03a883e20..f07bbd759 100644
 +        @export(&c.terminal_new_with_config, .{ .name = "ghostty_terminal_new_with_config" });
 +        @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
 +        @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
++        @export(&c.terminal_set_tab_width, .{ .name = "ghostty_terminal_set_tab_width" });
 +        @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
 +
 +        // RenderState API - high-performance rendering
@@ -329,7 +333,7 @@ index 03a883e20..f07bbd759 100644
          // On Wasm we need to export our allocator convenience functions.
          if (builtin.target.cpu.arch.isWasm()) {
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..18503933f 100644
+index bc92597..a4ff503 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -340,7 +344,7 @@ index bc92597f5..18503933f 100644
  
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,42 @@ pub const key_encoder_encode = key_encode.encode;
+@@ -52,6 +53,43 @@ pub const key_encoder_encode = key_encode.encode;
  
  pub const paste_is_safe = paste.is_safe;
  
@@ -349,6 +353,7 @@ index bc92597f5..18503933f 100644
 +pub const terminal_new_with_config = terminal.newWithConfig;
 +pub const terminal_free = terminal.free;
 +pub const terminal_resize = terminal.resize;
++pub const terminal_set_tab_width = terminal.setTabWidth;
 +pub const terminal_write = terminal.write;
 +
 +// RenderState API - high-performance rendering
@@ -383,7 +388,7 @@ index bc92597f5..18503933f 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +96,7 @@ test {
+@@ -59,6 +97,7 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
@@ -393,10 +398,10 @@ index bc92597f5..18503933f 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..d57b4e405
+index 0000000..651672a
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,1004 @@
+@@ -0,0 +1,1016 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -702,6 +707,8 @@ index 000000000..d57b4e405
 +    response_buffer: std.ArrayList(u8),
 +    /// Track alternate screen state to detect screen switches
 +    last_screen_is_alternate: bool = false,
++    /// Tab stop interval set by the host (dopamine #414). 0 = Ghostty's default (8).
++    tab_width: u16 = 0,
 +};
 +
 +/// C-compatible cell structure (16 bytes)
@@ -855,6 +862,16 @@ index 000000000..d57b4e405
 +pub fn resize(ptr: ?*anyopaque, cols: c_int, rows: c_int) callconv(.c) void {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
 +    wrapper.terminal.resize(wrapper.alloc, @intCast(cols), @intCast(rows)) catch return;
++    // A resize rebuilds the tab stops at every 8 columns; put the host's width back.
++    if (wrapper.tab_width != 0) wrapper.terminal.tabstops.reset(wrapper.tab_width);
++}
++
++/// Tab stops every `width` columns (dopamine #414). 0 or 8 = Ghostty's default.
++pub fn setTabWidth(ptr: ?*anyopaque, width: c_int) callconv(.c) void {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    const w: u16 = if (width <= 0 or width > 64) 8 else @intCast(width);
++    wrapper.tab_width = if (w == 8) 0 else w;
++    wrapper.terminal.tabstops.reset(w);
 +}
 +
 +pub fn write(ptr: ?*anyopaque, data: [*]const u8, len: usize) callconv(.c) void {
@@ -1402,7 +1419,7 @@ index 000000000..d57b4e405
 +    try std.testing.expectEqual(@as(u32, 'o'), cells[4].codepoint);
 +}
 diff --git a/src/terminal/render.zig b/src/terminal/render.zig
-index b6430ea34..10e0ef79d 100644
+index b6430ea..10e0ef7 100644
 --- a/src/terminal/render.zig
 +++ b/src/terminal/render.zig
 @@ -322,13 +322,14 @@ pub const RenderState = struct {
