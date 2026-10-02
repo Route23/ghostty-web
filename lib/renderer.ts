@@ -282,6 +282,8 @@ export class CanvasRenderer {
     this.ctx.textAlign = 'left';
 
     // Fill background after resize
+    // dopamine: clear first so a translucent theme background does not stack up.
+    this.ctx.clearRect(0, 0, cssWidth, cssHeight);
     this.ctx.fillStyle = this.theme.background;
     this.ctx.fillRect(0, 0, cssWidth, cssHeight);
   }
@@ -548,6 +550,9 @@ export class CanvasRenderer {
     // Clear line background with theme color.
     // We clear just the cell area - glyph overflow is handled by also
     // redrawing adjacent rows (see render() method).
+    // dopamine: clear first — painting a translucent background over the old row
+    // would stack alpha on every redraw until the row turns opaque.
+    this.ctx.clearRect(0, lineY, cols * this.metrics.width, this.metrics.height);
     this.ctx.fillStyle = this.theme.background;
     this.ctx.fillRect(0, lineY, cols * this.metrics.width, this.metrics.height);
 
@@ -966,6 +971,7 @@ export class CanvasRenderer {
     const scrollbarTrackHeight = canvasHeight - scrollbarPadding * 2;
 
     // Always clear the scrollbar area first (fixes ghosting when fading out)
+    ctx.clearRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
     ctx.fillStyle = this.theme.background;
     ctx.fillRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
 
@@ -1078,6 +1084,8 @@ export class CanvasRenderer {
    * Clear entire canvas
    */
   public clear(): void {
+    // dopamine: clear first so a translucent theme background does not stack up.
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.ctx.fillStyle = this.theme.background;
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
@@ -1096,7 +1104,8 @@ export class CanvasRenderer {
 
 function hexToRgb(hex: string): [number, number, number] {
   const h = hex.replace('#', '');
-  const v = h.length === 3 ? h.split('').map((c) => c + c).join('') : h.slice(0, 6);
+  // dopamine: '#rrggbbaa' (translucent backgrounds) — the alpha is ignored here.
+  const v = h.length === 3 || h.length === 4 ? h.slice(0, 3).split('').map((c) => c + c).join('') : h.slice(0, 6);
   const n = Number.parseInt(v, 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
