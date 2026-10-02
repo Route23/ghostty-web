@@ -263,9 +263,11 @@ export class Terminal implements ITerminalCore {
     // Handle hex colors (#RGB, #RRGGBB)
     if (color.startsWith('#')) {
       let hex = color.slice(1);
-      if (hex.length === 3) {
+      if (hex.length === 3 || hex.length === 4) {
         hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
       }
+      // dopamine: '#rrggbbaa' (translucent backgrounds) — the WASM side only takes RGB.
+      hex = hex.slice(0, 6);
       const value = Number.parseInt(hex, 16);
       return Number.isNaN(value) ? 0 : value;
     }
