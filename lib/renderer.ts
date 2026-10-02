@@ -127,6 +127,9 @@ export class CanvasRenderer {
   /** The font's real advance for one cell (unrounded), for ligature runs. */
   private advance = 0;
   private theme: Required<ITheme>;
+  // dopamine: the theme background as RGB, so cells that carry it (the VT reports the
+  // configured default bg) are left to the line fill — which may be translucent.
+  private themeBgRgb: [number, number, number] | null = null;
   private devicePixelRatio: number;
   private metrics: FontMetrics;
   private palette: string[];
@@ -695,7 +698,9 @@ export class CanvasRenderer {
 
     // Only draw cell background if it's different from the default (black)
     // This lets the theme background (drawn earlier) show through for default cells
-    const isDefaultBg = bg_r === 0 && bg_g === 0 && bg_b === 0;
+    const tb = (this.themeBgRgb ??= hexToRgb(this.theme.background));
+    const isThemeBg = !(cell.flags & CellFlags.INVERSE) && bg_r === tb[0] && bg_g === tb[1] && bg_b === tb[2];
+    const isDefaultBg = (bg_r === 0 && bg_g === 0 && bg_b === 0) || isThemeBg;
     if (!isDefaultBg) {
       this.ctx.fillStyle = this.rgbToCSS(bg_r, bg_g, bg_b);
       this.ctx.fillRect(cellX, cellY, cellWidth, this.metrics.height);
@@ -879,6 +884,7 @@ export class CanvasRenderer {
    */
   public setTheme(theme: ITheme): void {
     this.theme = { ...DEFAULT_THEME, ...theme };
+    this.themeBgRgb = null;
 
     // Rebuild palette
     this.palette = [
