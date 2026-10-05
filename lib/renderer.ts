@@ -138,6 +138,14 @@ export class CanvasRenderer {
   private cursorVisible: boolean = true;
   private cursorBlinkInterval?: number;
   private lastCursorPosition: { x: number; y: number } = { x: 0, y: 0 };
+  // dopamine (#914): what the last frame drew, so that a frame with nothing new
+  // draws nothing. See render().
+  private lastCursorLook: string = '';
+  private lastSelectionKey: string = '';
+  private lastScrollbackLength: number = 0;
+  private lastScrollbarShown: boolean = false;
+  // Asks whoever runs the render loop for a frame; see `requestFrame`.
+  private frameRequester?: () => void;
 
   // Viewport tracking (for scrolling)
   private lastViewportY: number = 0;
@@ -248,6 +256,7 @@ export class CanvasRenderer {
    */
   public remeasureFont(): void {
     this.metrics = this.measureFont();
+    this.requestFrame();
   }
 
   // ==========================================================================
@@ -304,9 +313,12 @@ export class CanvasRenderer {
     viewportY: number = 0,
     scrollbackProvider?: IScrollbackProvider,
     scrollbarOpacity: number = 1
-  ): void {
+  ): boolean {
     // Store buffer reference for grapheme lookups in renderCell
     this.currentBuffer = buffer;
+    // dopamine (#914): whether this frame made a draw call. The render loop
+    // rests while it does not (see FramePacer).
+    let drew = false;
 
     // getCursor() calls update() internally to ensure fresh state.
     // Multiple update() calls are safe - dirty state persists until clearDirty().
@@ -327,6 +339,7 @@ export class CanvasRenderer {
     if (needsResize) {
       this.resize(dims.cols, dims.rows);
       forceAll = true; // Force full render after resize
+      drew = true;
     }
 
     // Force re-render when viewport changes (scrolling)
@@ -335,16 +348,42 @@ export class CanvasRenderer {
       this.lastViewportY = viewportY;
     }
 
-    // Check if cursor position changed or if blinking (need to redraw cursor line)
+    // dopamine (#914): **a frame with nothing new draws nothing.**
+    //
+    // Any draw call dirties the canvas, whether or not a pixel changes, and a
+    // dirty canvas is composited. This used to redraw the cursor on every
+    // frame -- and, with blinking on, the line under it, which reads the whole
+    // screen back from the WASM side -- so a terminal sitting at its prompt
+    // kept the web content process, the GPU process and the app's compositor
+    // busy sixty times a second. The cursor is drawn when it changed (moved,
+    // blinked, another shape or colour) or when what is under it was redrawn.
+
+    // The scrollbar paints over the right edge of the rows. While it shows,
+    // the rows are redrawn as they always were; when it has gone, once more,
+    // to put back what it covered.
+    const scrollbarShown = !!scrollbackProvider && scrollbarOpacity > 0;
+    if (this.lastScrollbarShown && !scrollbarShown) {
+      forceAll = true;
+    }
+    this.lastScrollbarShown = scrollbarShown;
+
+    // Check if cursor position changed (need to redraw cursor line)
     const cursorMoved =
       cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
-    if (cursorMoved || this.cursorBlink) {
+    const cursorShown = viewportY === 0 && cursor.visible && this.cursorVisible;
+    const cursorLook = cursorShown
+      ? `${cursor.x},${cursor.y},${this.cursorStyle},${this.theme.cursor}`
+      : '';
+    const cursorChanged = cursorLook !== this.lastCursorLook;
+    this.lastCursorLook = cursorLook;
+    if (cursorMoved || cursorChanged) {
       // Mark cursor lines as needing redraw
       if (!forceAll && !buffer.isRowDirty(cursor.y)) {
         // Need to redraw cursor line
         const line = buffer.getLine(cursor.y);
         if (line) {
           this.renderLine(line, cursor.y, dims.cols);
+          drew = true;
         }
       }
       if (cursorMoved && this.lastCursorPosition.y !== cursor.y) {
@@ -353,6 +392,7 @@ export class CanvasRenderer {
           const line = buffer.getLine(this.lastCursorPosition.y);
           if (line) {
             this.renderLine(line, this.lastCursorPosition.y, dims.cols);
+            drew = true;
           }
         }
       }
@@ -366,13 +406,20 @@ export class CanvasRenderer {
     // This is used by isInSelection() to determine if a cell needs selection colors
     this.currentSelectionCoords = hasSelection ? this.selectionManager!.getSelectionCoords() : null;
 
-    // Mark current selection rows for redraw (includes programmatic selections)
-    if (this.currentSelectionCoords) {
+    // Mark current selection rows for redraw (includes programmatic selections).
+    // dopamine (#914): when the selection changed -- it used to be every frame,
+    // for as long as anything was selected. A row that is redrawn for another
+    // reason paints its selection with it (see renderCellBackground).
+    const selectionKey = this.currentSelectionCoords
+      ? `${this.currentSelectionCoords.startCol},${this.currentSelectionCoords.startRow},${this.currentSelectionCoords.endCol},${this.currentSelectionCoords.endRow}`
+      : '';
+    if (this.currentSelectionCoords && selectionKey !== this.lastSelectionKey) {
       const coords = this.currentSelectionCoords;
       for (let row = coords.startRow; row <= coords.endRow; row++) {
         selectionRows.add(row);
       }
     }
+    this.lastSelectionKey = selectionKey;
 
     // Always mark dirty selection rows for redraw (to clear old overlay)
     if (this.selectionManager) {
@@ -460,11 +507,23 @@ export class CanvasRenderer {
     // glyph overflow - tall glyphs like Devanagari vowel signs can extend into
     // adjacent rows' visual space.
     const rowsToRender = new Set<number>();
+    // When scrolled, the rows on screen come from the scrollback, so a dirty
+    // screen row does not say which of them changed: all of them are redrawn.
+    // dopamine (#914): but only when something can have changed -- new output
+    // (a dirty row, a scrollback of another length) or the scrollbar showing.
+    // It used to be every frame for as long as the scrollback was in view.
+    let scrolledBackChanged = false;
+    if (viewportY > 0) {
+      scrolledBackChanged = scrollbarShown || scrollbackLength !== this.lastScrollbackLength;
+      for (let y = 0; y < dims.rows && !scrolledBackChanged; y++) {
+        scrolledBackChanged = buffer.isRowDirty(y);
+      }
+    }
+    this.lastScrollbackLength = scrollbackLength;
     for (let y = 0; y < dims.rows; y++) {
-      // When scrolled, always force render all lines since we're showing scrollback
       const needsRender =
         viewportY > 0
-          ? true
+          ? forceAll || scrolledBackChanged || selectionRows.has(y) || hyperlinkRows.has(y)
           : forceAll || buffer.isRowDirty(y) || selectionRows.has(y) || hyperlinkRows.has(y);
 
       if (needsRender) {
@@ -509,6 +568,7 @@ export class CanvasRenderer {
 
       if (line) {
         this.renderLine(line, y, dims.cols);
+        drew = true;
       }
     }
 
@@ -517,14 +577,17 @@ export class CanvasRenderer {
 
     // Link underlines are drawn during cell rendering (see renderCell)
 
-    // Render cursor (only if we're at the bottom, not scrolled)
-    if (viewportY === 0 && cursor.visible && this.cursorVisible) {
+    // Render cursor (only if we're at the bottom, not scrolled) -- when it
+    // changed, or when the row it sits on was just redrawn under it.
+    if (cursorShown && (forceAll || cursorMoved || cursorChanged || rowsToRender.has(cursor.y))) {
       this.renderCursor(cursor.x, cursor.y);
+      drew = true;
     }
 
     // Render scrollbar if scrolled or scrollback exists (with opacity for fade effect)
     if (scrollbackProvider && scrollbarOpacity > 0) {
       this.renderScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
+      drew = true;
     }
 
     // Update last cursor position
@@ -534,6 +597,22 @@ export class CanvasRenderer {
     // This is critical - if we don't clear after a full redraw, the dirty
     // state persists and the next frame might not detect new changes properly.
     buffer.clearDirty();
+    return drew;
+  }
+
+  /**
+   * dopamine (#914): tell whoever runs the render loop that the next frame
+   * will have something to draw. The loop rests when frames draw nothing, so
+   * whatever changes what is on screen without going through the terminal's
+   * buffer -- the cursor blinking, a hovered link, a theme, a selection --
+   * has to say so.
+   */
+  public setFrameRequester(requester: (() => void) | undefined): void {
+    this.frameRequester = requester;
+  }
+
+  public requestFrame(): void {
+    this.frameRequester?.();
   }
 
   /**
@@ -863,7 +942,8 @@ export class CanvasRenderer {
     // xterm.js uses ~530ms blink interval
     this.cursorBlinkInterval = window.setInterval(() => {
       this.cursorVisible = !this.cursorVisible;
-      // Note: Render loop should redraw cursor line automatically
+      // dopamine (#914): the render loop may be resting. Wake it.
+      this.requestFrame();
     }, 530);
   }
 
@@ -873,6 +953,7 @@ export class CanvasRenderer {
       this.cursorBlinkInterval = undefined;
     }
     this.cursorVisible = true;
+    this.requestFrame();
   }
 
   // ==========================================================================
@@ -883,6 +964,7 @@ export class CanvasRenderer {
    * Update theme colors
    */
   public setTheme(theme: ITheme): void {
+    this.requestFrame();
     this.theme = { ...DEFAULT_THEME, ...theme };
     this.themeBgRgb = null;
 
@@ -913,6 +995,7 @@ export class CanvasRenderer {
   public setRenderOptions(opts: RenderOptions): void {
     this.renderOpts = { ...this.renderOpts, ...opts };
     this.metrics = this.measureFont();
+    this.requestFrame();
   }
 
   /**
@@ -921,6 +1004,7 @@ export class CanvasRenderer {
   public setFontSize(size: number): void {
     this.fontSize = size;
     this.metrics = this.measureFont();
+    this.requestFrame();
   }
 
   /**
@@ -929,6 +1013,7 @@ export class CanvasRenderer {
   public setFontFamily(family: string): void {
     this.fontFamily = family;
     this.metrics = this.measureFont();
+    this.requestFrame();
   }
 
   /**
@@ -936,6 +1021,7 @@ export class CanvasRenderer {
    */
   public setCursorStyle(style: 'block' | 'underline' | 'bar'): void {
     this.cursorStyle = style;
+    this.requestFrame();
   }
 
   /**
@@ -1017,6 +1103,7 @@ export class CanvasRenderer {
    * Set selection manager (for rendering selection)
    */
   public setSelectionManager(manager: SelectionManager): void {
+    this.requestFrame();
     this.selectionManager = manager;
   }
 
@@ -1054,6 +1141,7 @@ export class CanvasRenderer {
    * Set the currently hovered hyperlink ID for rendering underlines
    */
   public setHoveredHyperlinkId(hyperlinkId: number): void {
+    this.requestFrame();
     this.hoveredHyperlinkId = hyperlinkId;
   }
 
@@ -1069,6 +1157,7 @@ export class CanvasRenderer {
       endY: number;
     } | null
   ): void {
+    this.requestFrame();
     this.hoveredLinkRange = range;
   }
 
@@ -1090,6 +1179,7 @@ export class CanvasRenderer {
    * Clear entire canvas
    */
   public clear(): void {
+    this.requestFrame();
     // dopamine: clear first so a translucent theme background does not stack up.
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.ctx.fillStyle = this.theme.background;

@@ -895,10 +895,14 @@ export class SelectionManager {
    * Request a render update (triggers selection overlay redraw)
    */
   private requestRender(): void {
-    // The render loop will automatically pick up the new selection state
-    // and redraw the affected lines. This happens at 60fps.
+    // The render loop picks up the new selection state and redraws the
+    // affected lines.
+    //
+    // dopamine (#914): the loop rests when frames draw nothing, so it has to be
+    // told. (This used to be an empty hook: the loop ran at 60fps regardless.)
     //
     // Note: When clearSelection() is called, it adds dirty rows to dirtySelectionRows
     // which the renderer can use to know which lines to redraw.
+    this.renderer.requestFrame();
   }
 }
