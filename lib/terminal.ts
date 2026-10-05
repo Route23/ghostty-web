@@ -253,7 +253,7 @@ export class Terminal implements ITerminalCore {
     this.canvas.style.height = `${metrics.height * this.rows}px`;
 
     // Force full re-render with new font
-    this.renderer.render(this.wasmTerm, true, this.viewportY, this);
+    this.renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
   }
 
   /**
@@ -674,7 +674,7 @@ export class Terminal implements ITerminalCore {
     this.resizeEmitter.fire({ cols, rows });
 
     // Force full render
-    this.renderer!.render(this.wasmTerm!, true, this.viewportY, this);
+    this.renderer!.render(this.wasmTerm!, true, this.viewportY, this, this.scrollbarOpacity);
     this.wake();
   }
 

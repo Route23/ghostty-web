@@ -192,25 +192,54 @@ describe('CanvasRenderer on a frame with nothing new', () => {
     expect(calls.length).toBeGreaterThan(0);
   });
 
-  test('keeps redrawing under the scrollbar while it shows, and once after it has gone', () => {
+  test('draws the scrollbar when it changes, not while it just shows', () => {
     const { renderer, buffer } = settled();
     renderer.render(buffer, false, 3, scrollback, 1);
     calls = [];
-    // Showing: the rows and the bar, every frame, as before.
-    renderer.render(buffer, false, 3, scrollback, 1);
-    const showing = calls.length;
-    expect(showing).toBeGreaterThan(0);
-    calls = [];
+    // Showing and unchanged: nothing. (The bar clears its own strip, so the
+    // rows under it do not have to be redrawn for it.)
+    for (let i = 0; i < 5; i++) renderer.render(buffer, false, 3, scrollback, 1);
+    expect(calls).toEqual([]);
+
+    // Fading: the bar, and only the bar.
     renderer.render(buffer, false, 3, scrollback, 0.5);
-    expect(calls.length).toBe(showing);
+    const bar = calls.length;
+    expect(bar).toBeGreaterThan(0);
     calls = [];
 
-    // Gone: one full redraw puts back what the bar covered...
+    // A row drawn across its strip brings the bar back on top of it.
+    buffer.dirty.add(1);
+    renderer.render(buffer, false, 3, scrollback, 0.5);
+    expect(calls.length).toBeGreaterThan(bar);
+    calls = [];
+
+    // Gone: one full redraw puts back what the strip covered...
     renderer.render(buffer, false, 3, scrollback, 0);
     expect(calls.length).toBeGreaterThan(0);
     calls = [];
     // ...and then nothing.
     renderer.render(buffer, false, 3, scrollback, 0);
     expect(calls).toEqual([]);
+  });
+
+  test('invalidate redraws everything once, and asks for the frame', () => {
+    const { renderer, buffer } = settled();
+    let asked = 0;
+    renderer.setFrameRequester(() => {
+      asked++;
+    });
+    renderer.invalidate();
+    expect(asked).toBe(1);
+    renderer.render(buffer, false, 0, scrollback, 0);
+    const all = calls.length;
+    expect(all).toBeGreaterThan(0);
+    calls = [];
+    renderer.render(buffer, false, 0, scrollback, 0);
+    expect(calls).toEqual([]);
+
+    // A font or a theme changes how every row looks.
+    renderer.setFontSize(14);
+    renderer.render(buffer, false, 0, scrollback, 0);
+    expect(calls.length).toBeGreaterThanOrEqual(all);
   });
 });

@@ -23,6 +23,8 @@ export interface FramePacerClock {
   cancelAnimationFrame(handle: number): void;
   setTimeout(callback: () => void, ms: number): number;
   clearTimeout(handle: number): void;
+  /** Whether the page is hidden (animation frames do not come while it is). */
+  hidden(): boolean;
 }
 
 export interface FramePacerOptions {
@@ -51,6 +53,7 @@ export class FramePacer {
       cancelAnimationFrame: (handle) => cancelAnimationFrame(handle),
       setTimeout: (callback, ms) => window.setTimeout(callback, ms),
       clearTimeout: (handle) => window.clearTimeout(handle),
+      hidden: () => typeof document !== 'undefined' && document.hidden === true,
     }
   ) {
     this.idleAfter = options.idleAfter ?? 3;
@@ -102,7 +105,10 @@ export class FramePacer {
     if (!this.running) return;
 
     this.idleFrames = drew ? 0 : this.idleFrames + 1;
-    if (this.idleFrames >= this.idleAfter) {
+    // A hidden page gets no animation frames, which is exactly the rest that
+    // is wanted there: nobody can see it. The slow look would keep going --
+    // the loop this replaced did nothing at all while hidden.
+    if (this.idleFrames >= this.idleAfter && !this.clock.hidden()) {
       this.timer = this.clock.setTimeout(this.tick, this.pollMs);
     } else {
       this.animationFrame = this.clock.requestAnimationFrame(this.tick);

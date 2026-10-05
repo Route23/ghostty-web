@@ -6,6 +6,10 @@ class Clock implements FramePacerClock {
   private next = 1;
   frames = new Map<number, () => void>();
   timers = new Map<number, { callback: () => void; ms: number }>();
+  isHidden = false;
+  hidden(): boolean {
+    return this.isHidden;
+  }
   requestAnimationFrame(callback: () => void): number {
     this.frames.set(this.next, callback);
     return this.next++;
@@ -164,6 +168,36 @@ describe('FramePacer', () => {
     );
     self.p.start();
     expect(clock2.waiting).toBe('0 frame(s), 0 timer(s)');
+  });
+
+  test('a hidden page waits for an animation frame instead of looking again', () => {
+    const { clock, p, count } = pacer(() => false);
+    p.start();
+    clock.frame();
+    clock.frame();
+    expect(p.resting).toBe(true);
+
+    // Hidden while resting: the slow look that was already set goes off once,
+    // and then the pacer waits for a frame -- which does not come until the
+    // page shows again.
+    clock.isHidden = true;
+    clock.timeout();
+    expect(p.resting).toBe(false);
+    expect(clock.waiting).toBe('1 frame(s), 0 timer(s)');
+    const before = count();
+    p.wake(); // output arrives while hidden: nothing more to ask for
+    expect(clock.waiting).toBe('1 frame(s), 0 timer(s)');
+    expect(count()).toBe(before);
+
+    // Shown again: the frame comes, and it settles as usual (the wake started
+    // the count of idle frames over).
+    clock.isHidden = false;
+    clock.frame();
+    expect(count()).toBe(before + 1);
+    expect(p.resting).toBe(false);
+    clock.frame();
+    clock.frame();
+    expect(p.resting).toBe(true);
   });
 
   test('start twice does not run two loops', () => {

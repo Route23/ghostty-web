@@ -144,6 +144,9 @@ export class CanvasRenderer {
   private lastSelectionKey: string = '';
   private lastScrollbackLength: number = 0;
   private lastScrollbarShown: boolean = false;
+  private lastScrollbarLook: string = '';
+  // Set by invalidate(): the next frame redraws everything.
+  private forceNextFrame: boolean = false;
   // Asks whoever runs the render loop for a frame; see `requestFrame`.
   private frameRequester?: () => void;
 
@@ -256,7 +259,7 @@ export class CanvasRenderer {
    */
   public remeasureFont(): void {
     this.metrics = this.measureFont();
-    this.requestFrame();
+    this.invalidate();
   }
 
   // ==========================================================================
@@ -319,6 +322,10 @@ export class CanvasRenderer {
     // dopamine (#914): whether this frame made a draw call. The render loop
     // rests while it does not (see FramePacer).
     let drew = false;
+    if (this.forceNextFrame) {
+      this.forceNextFrame = false;
+      forceAll = true;
+    }
 
     // getCursor() calls update() internally to ensure fresh state.
     // Multiple update() calls are safe - dirty state persists until clearDirty().
@@ -358,9 +365,10 @@ export class CanvasRenderer {
     // busy sixty times a second. The cursor is drawn when it changed (moved,
     // blinked, another shape or colour) or when what is under it was redrawn.
 
-    // The scrollbar paints over the right edge of the rows. While it shows,
-    // the rows are redrawn as they always were; when it has gone, once more,
-    // to put back what it covered.
+    // The scrollbar paints over the right edge of the rows: it clears a strip
+    // there and draws itself in it. So the rows under it need no redrawing
+    // while it shows -- only once after it has gone, to put back what the
+    // strip covered.
     const scrollbarShown = !!scrollbackProvider && scrollbarOpacity > 0;
     if (this.lastScrollbarShown && !scrollbarShown) {
       forceAll = true;
@@ -510,11 +518,11 @@ export class CanvasRenderer {
     // When scrolled, the rows on screen come from the scrollback, so a dirty
     // screen row does not say which of them changed: all of them are redrawn.
     // dopamine (#914): but only when something can have changed -- new output
-    // (a dirty row, a scrollback of another length) or the scrollbar showing.
-    // It used to be every frame for as long as the scrollback was in view.
+    // (a dirty row, a scrollback of another length). It used to be every frame
+    // for as long as the scrollback was in view.
     let scrolledBackChanged = false;
     if (viewportY > 0) {
-      scrolledBackChanged = scrollbarShown || scrollbackLength !== this.lastScrollbackLength;
+      scrolledBackChanged = scrollbackLength !== this.lastScrollbackLength;
       for (let y = 0; y < dims.rows && !scrolledBackChanged; y++) {
         scrolledBackChanged = buffer.isRowDirty(y);
       }
@@ -585,10 +593,16 @@ export class CanvasRenderer {
     }
 
     // Render scrollbar if scrolled or scrollback exists (with opacity for fade effect)
-    if (scrollbackProvider && scrollbarOpacity > 0) {
+    // dopamine (#914): when it looks different from the last frame, or when a
+    // row was just drawn across its strip -- not on every frame it shows.
+    const scrollbarLook = scrollbarShown
+      ? `${viewportY},${scrollbackLength},${dims.rows},${scrollbarOpacity}`
+      : '';
+    if (scrollbackProvider && scrollbarShown && (drew || scrollbarLook !== this.lastScrollbarLook)) {
       this.renderScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
       drew = true;
     }
+    this.lastScrollbarLook = scrollbarLook;
 
     // Update last cursor position
     this.lastCursorPosition = { x: cursor.x, y: cursor.y };
@@ -613,6 +627,18 @@ export class CanvasRenderer {
 
   public requestFrame(): void {
     this.frameRequester?.();
+  }
+
+  /**
+   * dopamine (#914): redraw everything on the next frame. For whatever changes
+   * how the rows look without touching the terminal's buffer -- a theme, a
+   * font, the render options, a scrollbar that is no longer to be drawn. (It
+   * used to be enough to set the field: every row was not redrawn each frame,
+   * but enough was that the rest followed soon.)
+   */
+  public invalidate(): void {
+    this.forceNextFrame = true;
+    this.requestFrame();
   }
 
   /**
@@ -964,7 +990,7 @@ export class CanvasRenderer {
    * Update theme colors
    */
   public setTheme(theme: ITheme): void {
-    this.requestFrame();
+    this.invalidate();
     this.theme = { ...DEFAULT_THEME, ...theme };
     this.themeBgRgb = null;
 
@@ -995,7 +1021,7 @@ export class CanvasRenderer {
   public setRenderOptions(opts: RenderOptions): void {
     this.renderOpts = { ...this.renderOpts, ...opts };
     this.metrics = this.measureFont();
-    this.requestFrame();
+    this.invalidate();
   }
 
   /**
@@ -1004,7 +1030,7 @@ export class CanvasRenderer {
   public setFontSize(size: number): void {
     this.fontSize = size;
     this.metrics = this.measureFont();
-    this.requestFrame();
+    this.invalidate();
   }
 
   /**
@@ -1013,7 +1039,7 @@ export class CanvasRenderer {
   public setFontFamily(family: string): void {
     this.fontFamily = family;
     this.metrics = this.measureFont();
-    this.requestFrame();
+    this.invalidate();
   }
 
   /**
